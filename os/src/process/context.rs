@@ -1,7 +1,9 @@
 use core::arch::global_asm;
 use crate::trap::trap_return;
+
 global_asm!(include_str!("switch.S"));
 
+#[repr(C)]
 pub struct Context {
     ra:usize,
     sp:usize,
@@ -25,13 +27,12 @@ impl Context {
         }
     }}
 
-extern "C"{
-    fn __switch(src:*const Context,des: *const Context);
-}
 
-pub unsafe fn cxt_switch(src: &Context, des: &Context){
-    let _src=&src as *const Context;
-    let _des=&des as *const Context;
-    __switch(_src,_des);
+
+pub unsafe fn cxt_switch(src: *mut Context, des: *const Context){
+    extern "C"{
+        fn __switch(src:*mut Context,des: *const Context);
+    }
+    __switch(src,des);
 }
 

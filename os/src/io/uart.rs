@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
 
-use lazy_static::*;
 use core::sync::atomic::AtomicU64;
+use crate::io::STDOUT;
 
-const UART0: u64 = 0x10000000;
+pub const UART0: u64 = 0x10000000;
 const UART0_IRQ: u32 = 10;
 const RHR: u64 = 0;
 const THR: u64 = 0;
@@ -22,27 +22,19 @@ const LSR: u64 = 5;
 const LSR_TX_READY: u8 = 1 << 0;
 const LSR_TX_IDLE: u8 = 1 << 5;
 
-macro_rules! read_reg {
-    (reg : u64) => { *((UART0+reg) as mut u8*)};
-}
-
-macro_rules! write_reg {
-    (reg: u64, ch: u8) => {*((UART0+reg) as mut u8*)=ch};
-}
-
-unsafe fn read_reg(&reg: u64) -> u8 {
+unsafe fn read_reg(reg: u64) -> u8 {
     let ptr = (UART0 + reg) as * mut u8;
     return *ptr;
 }
 
-unsafe fn write_reg(&reg: u64, &ch: u8) {
+unsafe fn write_reg(reg: u64,ch: u8) {
     let ptr = (UART0 + reg) as *mut u8;
     *ptr = ch;
 }
 
-const UART_TX_BUF_SIZE: usize = 32;
+const UART_TX_BUF_SIZE: u64 = 32;
 
-static mut uart_tx_buf: [u64; UART_TX_BUF_SIZE] = [0; UART_TX_BUF_SIZE];
+static mut uart_tx_buf: [u64; UART_TX_BUF_SIZE as usize] = [0; UART_TX_BUF_SIZE as usize];
 static mut uart_tx_w: u64=0 ;
 static mut uart_tx_r: u64=0 ;
 
@@ -59,26 +51,26 @@ pub unsafe fn uart_init() {
 
 pub unsafe  fn uart_putchar(c: u8) {
     while uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE {}
-    uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = c;
+    uart_tx_buf[(uart_tx_w % UART_TX_BUF_SIZE) as usize] = c as u64;
     uart_tx_w += 1;
     uart_work();
 }
 
 pub unsafe fn uart_getchar() -> u8 {
-    if read_reg(LSR) & 0x01 {
-        return read_reg(RHR);
-    } else { return -1; }
+    return if (read_reg(LSR) & 0x01)==1 {
+        read_reg(RHR)
+    } else {0}
 }
 
 pub unsafe fn uart_work() {
     while true{
-        if(uart_tx_w== uart_tx_r){
+        if uart_tx_w== uart_tx_r {
             return
         }
         if read_reg(LSR)&LSR_TX_IDLE==0 {
             return
         }
-        let ch = uart_tx_buf[uart_tx_r%UART_TX_BUF_SIZE];
+        let ch = uart_tx_buf[(uart_tx_r%UART_TX_BUF_SIZE)as usize] as u8;
         uart_tx_r+=1;
         write_reg(THR,ch);
     }

@@ -18,11 +18,11 @@ impl RecycleCounter {
 
     pub fn alloc(&mut self)->Option<usize>{
         if self.recycle.is_empty(){
-            if cnt==size {
+            if self.cnt==self.size {
                 None
             }else {
-                cnt=cnt+1;
-                Option(cnt-1)
+                self.cnt=self.cnt+1;
+                Some(self.cnt-1)
             }
         }else{
             self.recycle.pop()

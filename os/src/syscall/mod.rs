@@ -1,3 +1,5 @@
+use core::arch::asm;
+use crate::println;
 use crate::syscall::delivery::{*};
 
 mod delivery;
@@ -11,12 +13,15 @@ const SYSCALL_GETPID: usize = 172;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_SHUTDOWN: usize = 1100;
 
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    // println!("Receive syscall id {}",syscall_id);
     match syscall_id {
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_SHUTDOWN =>sys_shutdown(),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_GET_TIME => sys_get_time(),
         SYSCALL_GETPID => sys_getpid(),
@@ -25,4 +30,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
+}
+
+const EXIT_SUCCESS: u32 = 0x5555;
+pub const VIRT_TEST: usize = 0x100000;
+
+pub fn sys_shutdown()->isize{
+    unsafe {
+        asm!(
+        "sw {0}, 0({1})",
+        in(reg) EXIT_SUCCESS,
+        in(reg) VIRT_TEST
+        );
+    }
+    0
 }

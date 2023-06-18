@@ -1,6 +1,8 @@
 use crate::io::uart::uart_getchar;
-use crate::print;
+use crate::mm::pagetable::PageTable;
+use crate::{print, println};
 use crate::process::scheduler::{SCHEDULER, Scheduler};
+use crate::utility::timer::get_time;
 
 const STDIN: usize = 0;
 const STDOUT: usize = 1;
@@ -8,7 +10,7 @@ const STDOUT: usize = 1;
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     match fd {
         STDOUT => {
-            let buffers = Scheduler::get_cur_pg_table().translated_byte_buffer(buf, len);
+            let buffers = PageTable::from_token(Scheduler::get_cur_token()).translated_byte_buffer(buf, len);
             for buffer in buffers {
                 print!("{}", core::str::from_utf8(buffer).unwrap());
             }
@@ -23,7 +25,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     match fd {
         STDIN => {
-            assert_eq!(len, 1, "Only support len = 1 in sys_read!");
             let mut c: usize;
             loop {
                 unsafe {
@@ -37,7 +38,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
                 }
             }
             let ch = c as u8;
-            let mut buffers = Scheduler::get_cur_pg_table().translated_byte_buffer( buf, len);
+            let mut buffers = PageTable::from_token(Scheduler::get_cur_token()).translated_byte_buffer( buf, len);
             unsafe {
                 buffers[0].as_mut_ptr().write_volatile(ch);
             }
@@ -50,7 +51,8 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    Scheduler::kernel_exit(exit_code)
+    Scheduler::kernel_exit(exit_code);
+    panic!("Unreachable in sys_exit!");
 }
 
 pub fn sys_yield() -> isize {
@@ -59,7 +61,7 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_getpid() -> isize {
-    SCHEDULER.exclusive_access().get_pid() as isize
+    Scheduler::kernel_getpid() as isize
 }
 
 pub fn sys_fork() -> isize {
@@ -67,8 +69,7 @@ pub fn sys_fork() -> isize {
 }
 
 pub fn sys_get_time() -> isize {
-    //todo
-    0
+    unsafe{get_time() as isize}
 }
 
 pub fn sys_exec(path: *const u8) -> isize {

@@ -4,8 +4,6 @@ use core::fmt;
 use core::fmt::Write;
 use crate::io::uart::{uart_init, uart_putchar, uart_work};
 
-const BACKSPACE: u32 = 0x100;
-
 struct STDOUT;
 
 pub fn init() {
@@ -27,7 +25,7 @@ impl Write for STDOUT {
 
     fn write_char(&mut self, c: char) -> core::fmt::Result {
         unsafe {
-            uart_purchar(c);
+            uart_putchar(c as u8);
             uart_work();
         }
         Ok(())

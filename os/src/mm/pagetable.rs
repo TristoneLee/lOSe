@@ -2,11 +2,12 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use core::slice::SliceIndex;
-use crate::mm::{floor, get_mut, get_offset, get_vir_indexes, PA_WIDTH, page_num_to_addr, PAGE_WIDTH, PhyAddr, PhysPageNum, PPN_WIDTH, read_frame, strampoline, to_ppn, to_va, to_vpn, TRAMPOLINE, VirAddr, VirPageNum};
+use crate::mm::{addr_to_page_num, floor, get_mut, get_offset, get_vir_indexes, page_num_to_addr, PAGE_WIDTH, PhyAddr, PhysPageNum, PPN_WIDTH, read_frame, read_pte_array, strampoline, to_ppn, to_va, to_vpn, TRAMPOLINE, VirAddr, VirPageNum};
 use crate::mm::frame_allocator::frame_alloc;
 use bitflags::*;
+use crate::io::print;
 use crate::mm::map_area::{MapArea, MapType};
+use crate::println;
 
 const PTE_FLAG_V: usize = 1;
 const PTE_FLAG_R: usize = 1 << 1;
@@ -18,11 +19,13 @@ const PTE_FLAG_A: usize = 1 << 6;
 const PTE_FLAG_D: usize = 1 << 7;
 const PTE_NO_FLAG: usize = 0;
 
+#[derive(Clone,Copy)]
 pub struct PageTableEntry(usize);
 
 impl PageTableEntry {
     pub fn new(ppn: PhysPageNum, flag: usize) -> Self {
-        PageTableEntry((ppn << 10) & flag)
+        // println!("create pte {:#b}",(ppn << 10) | flag);
+        PageTableEntry((ppn << 10) | flag)
     }
 
     pub fn empty() -> Self {
@@ -30,7 +33,7 @@ impl PageTableEntry {
     }
 
     pub fn ppn(&self) -> PhysPageNum {
-        self.0 >> 10 & (1 << PPN_WIDTH - 1)
+        (self.0 >> 10 )& ((1 << PPN_WIDTH) - 1)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -57,25 +60,31 @@ pub struct PageTable {
 
 impl PageTable {
     pub fn new(root: PhysPageNum) -> Self {
-        let frame = frame_alloc().unwrap();
         PageTable {
-            root: frame,
-            frames: vec![frame],
+            root,
+            frames: vec![root],
         }
     }
 
-    pub fn area_mapping(&mut self, mut area: MapArea) {
-        for vpn in area.start..=area.end {
+    pub fn from_token(satp: usize) -> Self {
+        Self {
+            root: satp & ((1usize << PPN_WIDTH) - 1),
+            frames: Vec::new(),
+        }
+    }
+
+    pub fn area_mapping(&mut self, area: &mut MapArea) {
+        for vpn in area.start..area.end {
             match area.map_type {
                 MapType::Identical => {
-                    let ppn: PhysPageNum = vpn;
-                    self.map(vpn, ppn, area.map_perm);
-                    area.frame_mapping.insert(vpn, frame)
+                    let frame: PhysPageNum = vpn;
+                    self.map(vpn, frame, area.map_perm);
+                    area.frame_mapping.insert(vpn, frame);
                 }
                 MapType::Framed => {
-                    let ppn = frame_alloc().unwrap();
+                    let frame = frame_alloc().unwrap();
                     self.map(vpn, frame, area.map_perm);
-                    area.frame_mapping.insert(vpn, frame)
+                    area.frame_mapping.insert(vpn, frame);
                 }
             }
         }
@@ -85,10 +94,16 @@ impl PageTable {
         8usize << 60 | self.root
     }
 
+    pub fn root_ppn(&self)->usize{
+        self.root
+    }
+
     pub fn load_trampoline(&mut self) {
+        println!("Loading trampoline at VA {:#x} for page table {:#x}",strampoline as usize,self.root);
         unsafe {
-            self.map(to_vpn(TRAMPOLINE), to_ppn(strampoline as usize),PTE_FLAG_R|PTE_FLAG_X)
+            self.map(addr_to_page_num(TRAMPOLINE), addr_to_page_num(strampoline as usize),PTE_FLAG_R|PTE_FLAG_X);
         }
+        println!("Trampoline loaded");
     }
 
     pub fn find_pte_create(&mut self, vpn: VirPageNum) -> Option<&mut PageTableEntry> {
@@ -96,22 +111,19 @@ impl PageTable {
         let mut ppn = self.root;
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, index) in indexes.iter().enumerate() {
-            let mut pte_ptr: *mut usize = ((ppn << PAGE_WIDTH) + index * size_of::<usize>()) as *mut usize;
-            let mut pte = PageTableEntry::empty();
-            unsafe {
-                pte.0 = *pte_ptr;
-            }
+            // println!("iter {}, index {}, at ppn {:#b}",i,index,ppn);
+            let pte = &mut read_pte_array(ppn)[*index];
             if i == 2 {
-                result = Some(&mut pte);
+                result = Some(pte);
                 break;
             }
             if !pte.is_valid() {
                 let frame = frame_alloc().unwrap();
-                unsafe {
-                    *pte_ptr = PageTableEntry::new(frame, PTE_FLAG_V).0;
-                }
+                *pte = PageTableEntry::new(frame, PTE_FLAG_V);
+                // println!("{:#b}",pte.0);
                 self.frames.push(frame);
             }
+            // println!("{:#b}",pte.ppn());
             ppn = pte.ppn();
         }
         result
@@ -122,16 +134,13 @@ impl PageTable {
         let mut ppn = self.root;
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, index) in indexes.iter().enumerate() {
-            let mut pte_ptr: *mut usize = ((ppn << PAGE_WIDTH) + index * size_of::<usize>()) as *mut usize;
-            let mut pte = PageTableEntry::empty();
-            unsafe {
-                pte.0 = *pte_ptr;
-            }
+            let pte = &mut read_pte_array(ppn)[*index];
             if i == 2 {
-                result = Some(&mut pte);
+                result = Some(pte);
                 break;
             }
             if !pte.is_valid() {
+                println!("Fail to find va{:#x} in pagetable {:#x}",page_num_to_addr(vpn),self.root);
                 return None;
             }
             ppn = pte.ppn();
@@ -141,7 +150,9 @@ impl PageTable {
 
     pub fn map(&mut self, vpn: VirPageNum, ppn: PhysPageNum, flag: usize) {
         let pte = self.find_pte_create(vpn).unwrap();
+        // println!("vpn {} mapped to ppn{}",vpn,ppn);
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        // println!("pagetable mapping flag {:#b}",flag|PTE_FLAG_V);
         *pte = PageTableEntry::new(ppn, flag | PTE_FLAG_V);
     }
 
@@ -152,8 +163,8 @@ impl PageTable {
     }
 
     pub fn translate_va(& self,va:VirAddr)->Option<PhyAddr>{
-        if let Some(pte)=self.find_pte(page_num_to_addr(va)){
-            Some(page_num_to_addr(pte.ppn())+get_offset(va));
+        if let Some(pte)=self.find_pte(addr_to_page_num(va)){
+            return Some(page_num_to_addr(pte.ppn())+get_offset(va));
         }
         None
     }
@@ -177,7 +188,9 @@ impl PageTable {
         let mut start = ptr as usize;
         let end = start + len;
         let mut v = Vec::new();
+        let mut iter =0;
         while start < end {
+            iter+=1;
             let start_va = to_va(start);
             let mut vpn: VirPageNum = floor(start_va);
             let ppn = self.find_pte(vpn).unwrap().ppn();

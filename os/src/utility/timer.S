@@ -1,32 +1,28 @@
+.section .text.trap
 .globl timervec
-.align 4
+.align 2
 timervec:
-        # start.c has set up the memory that mscratch points to:
-        # scratch[0,8,16] : register save area.
-        # scratch[24] : address of CLINT's MTIMECMP register.
-        # scratch[32] : desired interval between interrupts.
+    csrrw sp, mscratch, sp
+    sd t0, 0(sp)
+    sd t1, 1*8(sp)
+    sd t2, 2*8(sp)
 
-        csrrw a0, mscratch, a0
-        sd a1, 0(a0)
-        sd a2, 8(a0)
-        sd a3, 16(a0)
+    # setup next timer trigger
+    ld t0, 3*8(sp) # address of mtimercmp
+    ld t1, 4*8(sp) # timer interval      
+    ld t2, 0(t0) # current time
+    add t2, t2, t1 # new time
+    sd t2, 0(t0) # set newtime
 
-        # schedule the next timer interrupt
-        # by adding interval to mtimecmp.
-        ld a1, 24(a0) # CLINT_MTIMECMP(hart)
-        ld a2, 32(a0) # interval
-        ld a3, 0(a1)
-        add a3, a3, a2
-        sd a3, 0(a1)
+    # setup timer interrupt for supervisor 
+    li t0, 2
+    csrw sip, t0
+    # csrrs zero, mip, t0
 
-        # arrange for a supervisor software interrupt
-        # after this handler returns.
-        li a1, 2
-        csrw sip, a1
-
-        ld a3, 16(a0)
-        ld a2, 8(a0)
-        ld a1, 0(a0)
-        csrrw a0, mscratch, a0
-
-        mret
+    # restore registers
+    ld t0, 0(sp)
+    ld t1, 1*8(sp)
+    ld t2, 2*8(sp)
+    csrrw sp, mscratch, sp
+    
+    mret

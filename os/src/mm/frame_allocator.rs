@@ -3,12 +3,12 @@ use alloc::vec::Vec;
 use core::borrow::{Borrow, BorrowMut};
 use core::ops::Deref;
 use lazy_static::lazy_static;
-use crate::mm::{ceiling, ekernel, floor, MEMORY_END, PhysPageNum, to_ppn};
+use crate::mm::{ceiling, ekernel, floor, MEMORY_END, PhysPageNum, read_bytes_array, to_ppn};
 use crate::{print, println};
 use crate::utility::recycle_counter::RecycleCounter;
-use crate::sync::cell::UPSafeCell;
+use crate::sync::cell::Mutex;
 
-struct FrameAllocator{
+pub struct FrameAllocator{
     current: PhysPageNum,
     end: PhysPageNum,
     recycled: Vec<PhysPageNum>,
@@ -48,7 +48,7 @@ impl FrameAllocator{
 
 
 lazy_static! {
-    pub static ref FRAME_ALLOCATOR:UPSafeCell<FrameAllocator>=FrameAllocator::new();
+    pub static ref FRAME_ALLOCATOR:Mutex<FrameAllocator>= Mutex::new(FrameAllocator::new());
 }
 
 pub fn frame_allocator_init(){
@@ -57,13 +57,20 @@ pub fn frame_allocator_init(){
     }
     let begin=ceiling(ekernel as usize);
     let end = floor(MEMORY_END);
-    FRAME_ALLOCATOR.exclusive_access().init(begin,end)
+    FRAME_ALLOCATOR.lock().init(begin,end)
 }
 
 pub fn frame_alloc()->Option<PhysPageNum>{
-    FRAME_ALLOCATOR.exclusive_access().alloc()
+    let result=FRAME_ALLOCATOR.lock().alloc();
+    if let Some (ppn)=result{
+        let bytes_array = read_bytes_array(ppn);
+        for i in bytes_array {
+            *i = 0;
+        }
+    }
+    result
 }
 
 pub fn frame_dealloc(recycle: PhysPageNum){
-    FRAME_ALLOCATOR.exclusive_access().dealloc(recycle)
+    FRAME_ALLOCATOR.lock().dealloc(recycle)
 }

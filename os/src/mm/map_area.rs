@@ -16,7 +16,7 @@ pub const MAP_PERM_X:usize=1<<3;
 pub const MAP_PERM_U:usize=1<<4;
 
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct MapArea {
     pub start: VirPageNum,
     pub end: VirPageNum,
@@ -37,9 +37,9 @@ impl MapArea {
         }
     }
 
-    pub fn recycle(&mut self){
+    pub fn recycle(& self){
         for (_,ppn )in self.frame_mapping.iter(){
-            frame_dealloc(ppn as PhysPageNum);
+            frame_dealloc(*ppn as PhysPageNum);
         }
     }
 }

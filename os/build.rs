@@ -1,75 +1,67 @@
-use std::{
-    env,
-    fs::{self},
-    path::PathBuf,
-};
+use std::fs::{read_dir, File};
+use std::io::{Result, Write};
 
 fn main() {
-    let ld = &PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("linker.ld");
-    fs::write(ld, LINKER).unwrap();
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=LOG");
-    println!("cargo:rustc-link-arg=-T{}", ld.display());
+    println!("cargo:rerun-if-changed=../user/src/");
+    println!("cargo:rerun-if-changed={}", TARGET_PATH);
+    insert_app_data().unwrap();
 }
 
-const LINKER: &[u8] = b"
-OUTPUT_ARCH(riscv)
-ENTRY(_start)
-BASE_ADDRESS = 0x80000000;
+static TARGET_PATH: &str = "../user/target/riscv64gc-unknown-none-elf/release/";
 
-SECTIONS
-{
-    . = BASE_ADDRESS;
-    skernel = .;
+fn insert_app_data() -> Result<()> {
+    let mut f = File::create("src/link_app.S").unwrap();
+    let mut apps: Vec<_> = read_dir("../user/src/bin")
+        .unwrap()
+        .into_iter()
+        .map(|dir_entry| {
+            let mut name_with_ext = dir_entry.unwrap().file_name().into_string().unwrap();
+            name_with_ext.drain(name_with_ext.find('.').unwrap()..name_with_ext.len());
+            name_with_ext
+        })
+        .collect();
+    apps.sort();
 
-    stext = .;
-    .text : {
-        *(.text.entry)
-        . = ALIGN(4K);
-        strampoline = .;
-        *(.text.trampoline);
-        etrampoline = .;
-        . = ALIGN(4K);
-        *(.text .text.*)
+    writeln!(
+        f,
+        r#"
+    .align 3
+    .section .data
+    .global _num_app
+_num_app:
+    .quad {}"#,
+        apps.len()
+    )?;
+
+    for i in 0..apps.len() {
+        writeln!(f, r#"    .quad app_{}_start"#, i)?;
+    }
+    writeln!(f, r#"    .quad app_{}_end"#, apps.len() - 1)?;
+
+    writeln!(
+        f,
+        r#"
+    .global _app_names
+_app_names:"#
+    )?;
+    for app in apps.iter() {
+        writeln!(f, r#"    .string "{}""#, app)?;
     }
 
-    . = ALIGN(4K);
-    etext = .;
-
-    srodata = .;
-    .rodata : {
-        *(.rodata .rodata.*)
-        *(.srodata .srodata.*)
+    for (idx, app) in apps.iter().enumerate() {
+        println!("app_{}: {}", idx, app);
+        writeln!(
+            f,
+            r#"
+    .section .data
+    .global app_{0}_start
+    .global app_{0}_end
+    .align 3
+app_{0}_start:
+    .incbin "{2}{1}"
+app_{0}_end:"#,
+            idx, app, TARGET_PATH
+        )?;
     }
-
-    . = ALIGN(4K);
-    erodata = .;
-
-    sdata = .;
-    .data : {
-        *(.data.heap)
-        *(.data .data.*)
-        *(.sdata .sdata.*)
-    }
-
-    . = ALIGN(4K);
-    edata = .;
-
-    sbss_with_stack = .;
-    .bss : {
-        *(.bss.stack)
-        sbss = .;
-        *(.bss .bss.*)
-        *(.sbss .sbss.*)
-    }
-
-    . = ALIGN(4K);
-    ebss = .;
-    
-    ekernel = .;
-
-    /DISCARD/ : {
-        *(.eh_frame)
-    }
+    Ok(())
 }
-";

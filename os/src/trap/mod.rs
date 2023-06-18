@@ -1,14 +1,10 @@
 pub mod trap_context;
 
 use core::arch::{asm, global_asm};
-use riscv::register::{
-    mtvec::TrapMode,
-    scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,
-};
+use riscv::register::{mie, mtvec::TrapMode, satp, scause::{self, Exception, Interrupt, Trap}, sepc, sie, stval, stvec};
 use crate::mm::{TRAMPOLINE, TRAP_CONTEXT};
 use crate::println;
-use crate::process::scheduler::{cur_trap_cxt, Scheduler, SCHEDULER};
+use crate::process::scheduler::{Scheduler, SCHEDULER};
 use crate::syscall::syscall;
 
 global_asm!(include_str!("trap.S"));
@@ -36,20 +32,17 @@ fn set_user_trap_entry() {
 
 
 #[no_mangle]
-/// handle an interrupt, exception, or system call from user space
 pub fn trap_handler() -> ! {
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
+    //Different action corresponding to scause
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
-            // jump to next instruction anyway
-            let mut cxt = cur_trap_cxt();
+            let mut cxt = Scheduler::get_cur_trap_cxt();
             cxt.sepc += 4;
-            // get system call return value
-            let result = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]);
-            // cx is changed during sys_exec, so we have to call it again
-            cxt = cur_trap_cxt();
+            let result = syscall(cxt.x[17], [cxt.x[10], cxt.x[11], cxt.x[12]]);
+            cxt = Scheduler::get_cur_trap_cxt();
             cxt.x[10] = result as usize;
         }
         Trap::Exception(Exception::StoreFault)
@@ -62,9 +55,8 @@ pub fn trap_handler() -> ! {
                 "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
                 scause.cause(),
                 stval,
-                current_trap_cx().sepc,
+                Scheduler::get_cur_trap_cxt().sepc,
             );
-            // page fault exit code
             Scheduler::kernel_exit(-2);
         }
         Trap::Exception(Exception::IllegalInstruction) => {
@@ -73,7 +65,6 @@ pub fn trap_handler() -> ! {
             Scheduler::kernel_exit(-3);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            // set_next_trigger();
             Scheduler::kernel_yield();
         }
         _ => {
@@ -88,14 +79,10 @@ pub fn trap_handler() -> ! {
 }
 
 #[no_mangle]
-/// set the new addr of __restore asm function in TRAMPOLINE page,
-/// set the reg a0 = trap_cx_ptr, reg a1 = phy addr of usr page table,
-/// finally, jump to new addr of __restore asm function
 pub fn trap_return() -> ! {
     set_user_trap_entry();
     let trap_cx_ptr = TRAP_CONTEXT;
-    // todo warning: satp
-    let user_satp = SCHEDULER.exclusive_access().get_cur_prc().unwrap().page_table.token();
+    let user_satp = Scheduler::get_cur_token();
     extern "C" {
         fn __alltraps();
         fn __restore();
@@ -114,9 +101,12 @@ pub fn trap_return() -> ! {
 }
 
 #[no_mangle]
-/// Unimplement: traps/interrupts/exceptions from kernel mode
-/// Todo: Chapter 9: I/O device
 pub fn trap_from_kernel() -> ! {
+    println!( "Kernel trap in scause {}, stval {:#x}, sepc {:#x}, and satp {:#x}.",
+              scause::read().bits(),
+              stval::read(),
+              sepc::read(),
+              satp::read().bits(),);
     panic!("a trap {:?} from kernel!", scause::read().cause());
 }
 

@@ -1,66 +1,87 @@
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::ops::Deref;
+
 use lazy_static::lazy_static;
 use xmas_elf::dynamic::Tag::Null;
+use crate::io::print;
+
 use crate::loader::{get_app_data, get_app_data_by_name};
 use crate::mm::pagetable::PageTable;
+use crate::println;
 use crate::process::context::{Context, cxt_switch};
-use crate::sync::cell::UPSafeCell;
-use crate::process::process::{Process, ProcessStatus};
+use crate::process::process::{INITPROC, Process, ProcessStatus, ProcessWrapper};
 use crate::process::process::ProcessStatus::Dead;
+use crate::sync::cell::Mutex;
 use crate::trap::trap_context::TrapContext;
 
 pub struct Scheduler {
-    available_queue: Vec<Arc<Process>>,
-    cur_prc: Option<Arc<Process>>,
+    available_queue: Vec<Arc<ProcessWrapper>>,
+    cur_prc: Option<Arc<ProcessWrapper>>,
     scheduler_cxt: Context,
-}
-
-pub fn cur_trap_cxt() -> &'static mut TrapContext {
-    SCHEDULER.exclusive_access().cur_prc.unwrap().get_trap_cxt()
 }
 
 impl Scheduler {
     pub fn new() -> Self {
+        println!("Scheduler online");
         Scheduler {
-            available_queue: vec![],
+            available_queue: Vec::new(),
             cur_prc: None,
             scheduler_cxt: Context::new(),
         }
     }
 
-    pub fn push_prc(&mut self, prc: Arc<Process>) {
+    pub fn take_current_prc(&mut self) -> Option<Arc<ProcessWrapper>> {
+        self.cur_prc.take()
+    }
+
+    pub fn current_prc(&self) -> Option<Arc<ProcessWrapper>> {
+        self.cur_prc.as_ref().map(Arc::clone)
+    }
+
+    pub fn push_prc(&mut self, prc: Arc<ProcessWrapper>) {
         self.available_queue.push(prc);
     }
 
-    pub fn pop(&mut self) -> Option<Arc<Process>> {
-        self.available_queue.pop()
+    pub fn pop(&mut self) -> Option<Arc<ProcessWrapper>> {
+        Some(self.available_queue.remove(0))
     }
 
-    pub fn get_pid(&self) -> usize {
-        self.cur_prc.unwrap().pid
+    pub fn get_cur_pid() -> usize {
+        SCHEDULER.lock().current_prc().unwrap().inner().pid
     }
 
-    pub fn get_cur_prc(&mut self) -> &mut Option<Arc<Process>> {
-        &mut self.cur_prc
+    pub fn get_cur_token() -> usize {
+        SCHEDULER.lock().current_prc().unwrap().inner().page_table.token()
     }
 
-    pub fn get_cur_pg_table() -> & PageTable{
-        & SCHEDULER.exclusive_access().cur_prc.unwrap().page_table
+    // pub fn get_cur_pg_table() -> & 'static PageTable{
+    //     & SCHEDULER.lock().current_prc().unwrap().page_table
+    // }
+
+    pub fn get_cur_trap_cxt() -> &'static mut TrapContext {
+        SCHEDULER.lock().current_prc().unwrap().inner().get_trap_cxt()
     }
 }
 
 lazy_static! {
-    pub static ref SCHEDULER: UPSafeCell<Scheduler> =unsafe { UPSafeCell::new(Scheduler::new()) };
+    pub static ref SCHEDULER: Mutex<Scheduler> =unsafe { Mutex::new(Scheduler::new()) };
 }
+
 pub fn run() {
+    println!("Begin scheduling!");
     loop {
-        let mut scheduler = SCHEDULER.exclusive_access();
+        let mut scheduler = SCHEDULER.lock();
         if let Some(prc) = scheduler.pop() {
-            let scheduler_cxt_ptr = &scheduler.scheduler_cxt;
-            let next_cxt_ptr = &prc.context;
-            prc.status = ProcessStatus::Running;
+            let mut prc_inner = prc.inner();
+            let scheduler_cxt_ptr = &mut scheduler.scheduler_cxt as *mut Context;
+            let next_cxt_ptr = &prc_inner.context as *const Context;
+            // println!("next prc {}", prc.pid);
+            prc_inner.status = ProcessStatus::Running;
+            drop(prc_inner);
             scheduler.cur_prc = Some(prc);
             drop(scheduler);
             unsafe {
@@ -72,90 +93,105 @@ pub fn run() {
 
 impl Scheduler {
     pub fn kernel_yield() {
-        let mut scheduler = SCHEDULER.exclusive_access();
-        let cur_prc = &scheduler.cur_prc;
-        assert_ne!(cur_prc, None);
-        let cur_prc = cur_prc.unwrap();
-        let cur_cxt_ptr = &cur_prc.context;
-        prc.status = ProcessStatus::Ready;
+        let mut scheduler = SCHEDULER.lock();
+        let cur_prc = scheduler.current_prc().unwrap();
+        let mut cur_prc_inner = cur_prc.inner();
+        let cur_cxt_ptr = &mut cur_prc_inner.context as *mut Context;
+        let scheduler_cxt_ptr = &scheduler.scheduler_cxt as *const Context;
+        cur_prc_inner.status = ProcessStatus::Ready;
+        // println!("Process {} yield.", cur_prc_inner.pid);
+        drop(cur_prc_inner);
         scheduler.push_prc(cur_prc);
-        let scheduler_cxt_ptr = &scheduler.scheduler_cxt;
+        // println!("[After yield] Have {} process in scheduler the first is {}.", scheduler.available_queue.len(), scheduler.available_queue.first().unwrap().pid);
+        drop(scheduler);
         unsafe {
             cxt_switch(cur_cxt_ptr, scheduler_cxt_ptr);
         }
     }
 
-    //todo a lot to do initproc
     pub fn kernel_exit(exit_code: i32) {
-        let scheduler = SCHEDULER.exclusive_access();
-        let prc = &scheduler.cur_prc;
-        assert_ne!(prc, None);
-        let mut prc = prc.unwrap();
-        let pid = prc.pid;
-        //todo guanji
-        prc.status = ProcessStatus::Dead;
-        prc.exit_code = exit_code;
-        prc.children.clear();
-        prc.frame_recycle();
-        let scheduler_cxt_ptr = &scheduler.scheduler_cxt;
-        let null_cxt = &Context::new();
+        let scheduler = SCHEDULER.lock();
+        let cur_prc = scheduler.current_prc().unwrap();
+        let mut cur_prc_inner = cur_prc.inner();
+        let pid = cur_prc_inner.pid;
+        cur_prc_inner.status = ProcessStatus::Dead;
+        cur_prc_inner.exit_code = exit_code;
+        {
+            let mut initproc_inner = INITPROC.inner();
+            for child in cur_prc_inner.children.iter() {
+                child.inner().parent = Some(Arc::downgrade(&INITPROC));
+                initproc_inner.children.push(child.clone());
+            }
+        }
+        cur_prc_inner.children.clear();
+        cur_prc_inner.frame_recycle();
+        let scheduler_cxt_ptr = &scheduler.scheduler_cxt as *const Context;
+        drop(scheduler);
+        drop(cur_prc_inner);
+        let null_cxt = &mut Context::new();
         unsafe {
             cxt_switch(null_cxt, scheduler_cxt_ptr);
         }
     }
 
     pub fn kernel_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
-        let prc = &SCHEDULER.exclusive_access().cur_prc;
-        assert_ne!(prc, None);
-        let prc = prc.unwrap();
-        if prc.children.is_empty() ||
-            pid != -1 && !prc.children.iter()
+        let scheduler = SCHEDULER.lock();
+        let cur_prc = scheduler.current_prc().unwrap();
+        let mut cur_prc_inner = cur_prc.inner();
+        // println!("Process {} waitpid.", cur_prc_inner.pid);
+        if cur_prc_inner.children.is_empty() ||
+            pid != -1 && !cur_prc_inner.children.iter()
                 .any(|p| pid == -1 || pid as usize == p.pid) {
             return -1;
         }
-        let pair = prc.children.iter().enumerate().find(
+        let pair = cur_prc_inner.children.iter().enumerate().find(
             |(_, p)| {
-                (p.pid == pid as usize || pid == -1) && p.status == Dead
+                (p.pid == pid as usize || pid == -1) && p.inner().status == Dead
             }
         );
         if let Some((idx, _)) = pair {
-            let child = prc.children.remove(idx);
-            assert_eq!(Arc::strong_count(&child), 1);
-            let found_pid = child.pid;
-            let exit_code = child.exit_code;
+            let child = cur_prc_inner.children.remove(idx);
+            let child_inner = child.inner();
+            // assert_eq!(Arc::strong_count(&child), 1);
+            let found_pid = child_inner.pid;
+            let exit_code = child_inner.exit_code;
             //todo can or not use pagetable of current process
-            let exit_code_pa = prc.page_table.translate_va(exit_code_ptr as usize) as *mut i32;
+            let exit_code_pa = cur_prc_inner.page_table.translate_va(exit_code_ptr as usize).unwrap() as *mut i32;
             unsafe {
                 *exit_code_pa = exit_code
             }
-            found_pid as isize
+            return found_pid as isize;
         }
         -2
     }
 
     pub fn kernel_getpid() -> usize {
-        SCHEDULER.exclusive_access().get_pid()
+        Scheduler::get_cur_pid()
     }
 
     pub fn kernel_fork() -> isize {
-        let mut scheduler = &SCHEDULER.exclusive_access();
-        let cur_prc = scheduler.cur_prc.unwrap();
-        let mut new_prc = cur_prc.clone();
-        new_prc.parent = Option::from(Arc::downgrade(&cur_prc));
-        cur_prc.children.push(new_prc.clone());
-        let new_pid = new_prc.pid;
-        let trap_cxt = new_prc.get_trap_cxt();
+        let mut scheduler = SCHEDULER.lock();
+        let cur_prc = scheduler.current_prc().unwrap();
+        let mut cur_prc_inner = cur_prc.inner();
+        println!("Process {} fork.", cur_prc_inner.pid);
+        let mut new_prc_inner = Process::clone(cur_prc_inner.borrow());
+        new_prc_inner.parent = Option::from(Arc::downgrade(&cur_prc));
+        let trap_cxt = new_prc_inner.get_trap_cxt();
         trap_cxt.x[10] = 0;
+        let new_prc = Arc::new(ProcessWrapper::new(new_prc_inner));
+        let new_pid = new_prc.pid;
+        cur_prc_inner.children.push(new_prc.clone());
         scheduler.push_prc(new_prc);
         new_pid as isize
     }
 
     pub fn kernel_exec(path: *const u8) -> isize {
-        let mut scheduler = &SCHEDULER.exclusive_access();
-        let mut cur_prc = scheduler.cur_prc.unwrap();
-        let path = cur_prc.page_table.translated_str(path);
+        let mut scheduler = &SCHEDULER.lock();
+        let cur_prc = scheduler.current_prc().unwrap();
+        let mut cur_prc_inner = cur_prc.inner();
+        let path = cur_prc_inner.page_table.translated_str(path);
         if let Some(data) = get_app_data_by_name(path.as_str()) {
-            cur_prc.exec(data);
+            cur_prc_inner.exec(data);
             0
         } else {
             -1
